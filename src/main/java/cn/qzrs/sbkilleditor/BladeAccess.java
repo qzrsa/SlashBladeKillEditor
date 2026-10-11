@@ -101,6 +101,25 @@ public final class BladeAccess {
     private static final String RELAY_TAG_PREFIX = "sbke_";
 
     /**
+     * 中转实体「主手」的 NBT 路径候选。<b>顺序很重要</b>，且这条路径跨版本变过：
+     *
+     * <ul>
+     *   <li>{@code HandItems[0]} —— <b>1.21.4 及以前</b>（含本插件目标 1.21.1）。</li>
+     *   <li>{@code equipment.mainhand} —— <b>1.21.5 起</b>：官方把
+     *       {@code ArmorItems}/{@code HandItems}/{@code body_armor_item} 合并成了 {@code equipment}
+     *       字段（见 Minecraft Wiki: Java 版 1.21.5）。</li>
+     * </ul>
+     *
+     * <p><b>⚠️ 写错路径不会报错，只会静默失效</b>：{@code data modify ... set value} 会自动
+     * 补齐不存在的中间复合标签，于是命令照样回 {@code Modified entity data}，
+     * 但实体上真正的东西一点没动，还凭空多出一个垃圾键。
+     * 历史 bug 就是这里 —— 本插件曾用 {@code equipment.mainhand}，在 1.21.1 上永久静默失效。
+     * 所以：<b>每条 {@code data modify} 前面都必须加 {@code execute if data} 存在性判断</b>，
+     * 让「路径不对」变成「什么都不做」而不是「假装成功」。
+     */
+    static final String[] EQUIP_PATHS = {"HandItems[0]", "equipment.mainhand"};
+
+    /**
      * 首选写入通道的名字。命中它 = 一切正常，日志可以最精简
      * （命令层据此决定 {@code [写入成功]} 里要不要标出通道）。
      */
@@ -119,6 +138,9 @@ public final class BladeAccess {
 
     private String lastDispatchError;
     private String lastError;
+
+    /** 本次写入请求实际派发过的命令（成功时不留痕，失败时整体打出来复盘）。 */
+    private final List<String> attemptLog = new ArrayList<>();
 
     public BladeAccess(SlashBladeKillEditor plugin, PluginConfig cfg) {
         this.plugin = plugin;
@@ -193,6 +215,7 @@ public final class BladeAccess {
 
         // 方案表：命令优先（命名空间写法最不容易被插件拦），最后是 null = 中转盔甲架
         String[] plan = {"minecraft:" + tail, tail, null};
+        attemptLog.clear();
         runPlan(p, f, value, plan, 0, cb);
     }
 
@@ -203,6 +226,7 @@ public final class BladeAccess {
     private void runPlan(Player p, Field f, int value, String[] plan, int idx, WriteCallback cb) {
         if (idx >= plan.length) {
             rescueIfLost(p);
+            dumpAttempts(p, f, value, plan);
             cb.done(false, lastError == null ? "所有写入通道均失败" : lastError);
             return;
         }
@@ -283,36 +307,107 @@ public final class BladeAccess {
         dispatch(consoleSender, ctx + "item replace entity " + sel
                 + " weapon.mainhand from entity " + name + " weapon.mainhand");
 
-        // ③ 改数值
-        dispatch(consoleSender, ctx + "data modify entity " + sel
-                + " equipment.mainhand." + PATH_BLADE_STATE + "." + FIELD_NAME.get(f)
-                + " set value " + value);
+        // ③ 改数值。逐条候选路径都试，但**每条都必须先 if data 判断字段真实存在** ——
+        //    否则 data modify ... set value 会把不存在的路径凭空造出来，命令回「成功」而实际没改。
+        for (String equip : EQUIP_PATHS) {
+            dispatch(consoleSender, buildModifyCmd(ctx, sel, equip, f, value));
+        }
 
-        // ④ 搬回玩家主手 —— 必须先确认中转手上真有东西，否则会把玩家主手清空
+        // ④ 搬回玩家主手
         moveBack(sel, name);
     }
 
-    /** 从中转实体搬回玩家主手；带存在性判断，绝不用空手覆盖玩家主手。 */
-    private void moveBack(String sel, String playerName) {
-        dispatch(consoleSender, "execute at " + playerName + " run execute if data entity " + sel
-                + " equipment.mainhand.count run item replace entity " + playerName
-                + " weapon.mainhand from entity " + sel + " weapon.mainhand");
+    /**
+     * 构造「把中转实体主手上的刀刃字段改成 value」的命令。
+     *
+     * <p>关键的 {@code execute if data entity <中转> <路径>} 前置判断：
+     * 路径不存在时整条命令<b>什么都不做</b>，而不是让 {@code set value} 把
+     * 不存在的路径凭空造出来（那样命令会回「成功」却静默无效 —— 本插件踩过的坑）。
+     */
+    static String buildModifyCmd(String ctx, String sel, String equip, Field f, int value) {
+        String fieldPath = equip + "." + PATH_BLADE_STATE + "." + FIELD_NAME.get(f);
+        return ctx + "execute if data entity " + sel + " " + fieldPath
+                + " run data modify entity " + sel + " " + fieldPath + " set value " + value;
+    }
+
+    /** 构造「把中转实体主手的东西搬回玩家主手」的命令（同样带 {@code if data} 前置判断）。 */
+    static String buildMoveBackCmd(String playerName, String sel, String equip) {
+        return "execute at " + playerName + " run execute if data entity " + sel
+                + " " + equip + ".count run item replace entity " + playerName
+                + " weapon.mainhand from entity " + sel + " weapon.mainhand";
     }
 
     /**
-     * 抢救：若玩家主手空了，说明第 ④ 步没成功、刀还留在中转实体里 —— 再搬一次。
-     * 同样带存在性判断，所以即使主手只是「镜像显示为空」也不会误清。
+     * 从中转实体搬回玩家主手。<b>两条装备路径都试</b>，各自带 {@code if data} 存在性判断：
+     * 判断成立说明那条路径上真有东西，才搬 —— 既不会用空手覆盖玩家主手，
+     * 也不会因为猜错路径把刀永久留在中转实体里。
+     */
+    private void moveBack(String sel, String playerName) {
+        for (String equip : EQUIP_PATHS) {
+            dispatch(consoleSender, buildMoveBackCmd(playerName, sel, equip));
+        }
+    }
+
+    /** 用纯 Bukkit 找出该玩家的中转实体（不执行任何命令）。 */
+    private ArmorStand findRelay(Player p) {
+        String tag = relayTag(p);
+        try {
+            for (World w : Bukkit.getWorlds()) {
+                for (ArmorStand as : w.getEntitiesByClass(ArmorStand.class)) {
+                    if (as.getScoreboardTags().contains(tag)) {
+                        return as;
+                    }
+                }
+            }
+        } catch (Throwable ignored) {
+            // 忽略
+        }
+        return null;
+    }
+
+    /**
+     * 抢救：玩家主手空了，说明刀还卡在中转实体里。
+     *
+     * <p>这里<strong>故意不走命令</strong>，而是用纯 Bukkit 读中转实体、直接搬回 ——
+     * 上一版的教训：抢救本身也用同一条（写错的）NBT 路径做判断，于是判断恒为假、
+     * 抢救静默失效，刀就永久留在中转实体里了。纯 Bukkit 不依赖任何路径猜测。
+     * 搬回顺序为「先清空中转、再放进主手」，中间不会出现两份。
      */
     private void rescueIfLost(Player p) {
         if (p.getInventory().getItemInMainHand().getType() != Material.AIR) {
             return;
         }
-        String sel = relaySelector(p);
-        plugin.getLogger().warning("[抢救] " + p.getName() + " 主手为空，尝试从中转实体把刀搬回…");
-        moveBack(sel, p.getName());
-        plugin.getLogger().warning("[抢救] 若仍未搬回，请手工执行："
-                + " /execute at " + p.getName() + " run item replace entity " + p.getName()
-                + " weapon.mainhand from entity " + sel + " weapon.mainhand");
+        ArmorStand relay = findRelay(p);
+        if (relay == null) {
+            plugin.getLogger().warning("[抢救] " + p.getName()
+                    + " 主手为空，但没找到中转实体 —— 刀应该没丢。");
+            return;
+        }
+        ItemStack held = relay.getEquipment() == null
+                ? new ItemStack(Material.AIR)
+                : relay.getEquipment().getItemInMainHand();
+        if (held.getType() == Material.AIR) {
+            plugin.getLogger().warning("[抢救] " + p.getName()
+                    + " 主手为空，中转实体手上也是空的 —— 没有可抢救的物品。");
+            return;
+        }
+
+        plugin.getLogger().warning("[抢救] 检测到「" + held.getType() + " x" + held.getAmount()
+                + "」还卡在中转实体 " + relayTag(p) + " 里，用纯 Bukkit 直接搬回…");
+        try {
+            relay.getEquipment().setItemInMainHand(null);
+            p.getInventory().setItemInMainHand(held);
+            p.updateInventory();
+            plugin.getLogger().warning("[抢救] 已搬回主手。");
+        } catch (Throwable t) {
+            // 搬回失败就把东西放回中转实体，绝不凭空吞掉
+            try {
+                relay.getEquipment().setItemInMainHand(held);
+            } catch (Throwable ignored) {
+                // 忽略
+            }
+            plugin.getLogger().severe("[抢救] 搬回失败（" + t + "），物品已退回中转实体，未丢失。");
+        }
     }
 
     // =====================================================================
@@ -521,11 +616,32 @@ public final class BladeAccess {
             if (preview == null) {
                 out.add("写入命令预览: <字段替换失败>");
             } else {
-                out.add("写入命令预览(普通): item replace entity " + p.getName()
-                        + " weapon.mainhand with " + safeKey(main) + preview);
-                out.add("写入命令预览(命名空间): minecraft:item replace entity " + p.getName()
-                        + " weapon.mainhand with " + safeKey(main) + preview);
+                String plain = "item replace entity " + p.getName()
+                        + " weapon.mainhand with " + safeKey(main) + preview;
+                String ns = "minecraft:" + plain;
+                out.add("写入命令预览(普通): " + plain);
+                out.add("写入命令预览(命名空间): " + ns);
+                out.add("写入命令长度: 普通 " + plain.length() + " 字符 / 命名空间 "
+                        + ns.length() + " 字符");
             }
+        }
+
+        // 服务端版本 —— 决定中转实体该用哪条装备路径（1.21.5 起 HandItems → equipment）
+        out.add("服务端版本: " + safeBukkitVersion());
+        out.add("中转装备路径候选: " + String.join(" / ", EQUIP_PATHS)
+                + "（按序尝试，写错路径只会静默失效，所以每条都带 if data 判断）");
+
+        // 中转实体现状（纯 Bukkit 读）—— 一眼看出刀有没有卡在里面
+        ArmorStand relay = findRelay(p);
+        if (relay == null) {
+            out.add("中转实体(" + relayTag(p) + "): 不存在");
+        } else {
+            ItemStack rh = (relay.getEquipment() == null)
+                    ? new ItemStack(Material.AIR)
+                    : relay.getEquipment().getItemInMainHand();
+            out.add("中转实体(" + relayTag(p) + "): 存在，世界=" + relay.getWorld().getName()
+                    + "，主手=" + rh.getType() + " x" + rh.getAmount()
+                    + (rh.getType() == Material.AIR ? "（空）" : "  ← 玩家手上若没刀，刀就在这里"));
         }
 
         if (lastError != null) {
@@ -542,6 +658,15 @@ public final class BladeAccess {
             return String.valueOf(it.getType().getKey());
         } catch (Throwable t) {
             return "<取不到: " + t + ">";
+        }
+    }
+
+    /** 形如 {@code 1.21.1-R0.1-SNAPSHOT}；取不到不影响使用。 */
+    private static String safeBukkitVersion() {
+        try {
+            return Bukkit.getBukkitVersion();
+        } catch (Throwable t) {
+            return "<取不到>";
         }
     }
 
@@ -569,21 +694,45 @@ public final class BladeAccess {
      * 写入成功只需一条 {@code [写入成功]}。即便打开回显，也是走 {@link #compact} 的
      * <b>折叠</b>版本而非全量，所以控制台不会被上千字符的组件 SNBT 淹没。
      * 需要完整命令时用 {@code /sbkill debug}。
+     *
+     * <p>失败时另有一条兜底：本次写入若最终全军覆没，{@link #dumpAttempts} 会把
+     * 试过的命令一次性打出来，<b>不用提前开 verbose 也能复盘</b>。
      */
     private void dispatch(CommandSender s, String commandLine) {
         if (s == null || commandLine == null) {
             return;
         }
+        attemptLog.add(commandLine);
         if (cfg.verboseCommands) {
             plugin.getLogger().info("[CMD] /" + compact(commandLine));
         }
         try {
-            Bukkit.dispatchCommand(s, commandLine);
+            // dispatchCommand 返回 false = 服务端压根没认这条命令（另一种失败，和"执行了但没生效"不同）
+            boolean handled = Bukkit.dispatchCommand(s, commandLine);
+            if (!handled) {
+                this.lastDispatchError = "服务端未识别该命令（dispatchCommand 返回 false）";
+                plugin.getLogger().warning("[CMD] 未被识别 /" + compact(commandLine));
+            }
         } catch (Throwable t) {
             this.lastDispatchError = t.getClass().getSimpleName() + ": " + t.getMessage();
             plugin.getLogger().warning("[CMD] 派发失败 /" + compact(commandLine)
                     + " -> " + lastDispatchError);
         }
+    }
+
+    /** 写入彻底失败时，把本次试过的命令一次性打到控制台，便于直接拷给作者复盘。 */
+    private void dumpAttempts(Player p, Field f, int value, String[] plan) {
+        plugin.getLogger().warning("[写入失败] " + p.getName() + " " + FIELD_NAME.get(f) + "=" + value
+                + " —— 三条通道均未生效。本次实际派发了 " + attemptLog.size() + " 条命令：");
+        int n = 1;
+        for (String c : attemptLog) {
+            plugin.getLogger().warning("  (" + n++ + ") [" + c.length() + " 字符] /" + compact(c));
+        }
+        if (plan.length > 0 && plan[0] != null) {
+            plugin.getLogger().warning("[写入失败] 主命令完整长度 " + plan[0].length()
+                    + " 字符；完整内容请执行 /sbkill debug 查看。");
+        }
+        plugin.getLogger().warning("[写入失败] 请把上面这段（连同此前后各几行控制台输出）发回给插件作者。");
     }
 
     /**

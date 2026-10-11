@@ -1,5 +1,6 @@
 package cn.qzrs.sbkilleditor;
 
+import org.bukkit.Bukkit;
 import org.bukkit.command.PluginCommand;
 import org.bukkit.plugin.java.JavaPlugin;
 
@@ -31,6 +32,18 @@ public final class SlashBladeKillEditor extends JavaPlugin {
         command.setTabCompleter(handler);
 
         getLogger().info("SlashBladeKillEditor 已启用 —— 目标组件路径 slashblade:blade_state");
+        getLogger().info("  服务端: " + safeVersion()
+                + " | 中转装备路径候选: " + String.join(" → ", BladeAccess.EQUIP_PATHS));
+        getLogger().info("  [CMD] 命令回显: " + (cfg.verboseCommands ? "开" : "关（默认）")
+                + " | 写入失败时会自动打印本次试过的命令，无需提前开启");
+    }
+
+    private static String safeVersion() {
+        try {
+            return Bukkit.getBukkitVersion();
+        } catch (Throwable t) {
+            return "<未知>";
+        }
     }
 
     @Override

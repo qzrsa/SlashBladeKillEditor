@@ -2,11 +2,16 @@
 
 > 在线修改手持拔刀剑的 **杀敌数 / 耀魂 / 锻造数**
 > 目标环境：**Arclight NeoForge 1.21.1** + **SlashBlade: Resharped 2.0.x**
-> 产物：`SlashBladeKillEditor-1.0.1.jar`（已编译好，直接丢 plugins）
+> 产物：`SlashBladeKillEditor-1.0.2.jar`（已编译好，直接丢 plugins）
 >
 > ✅ **状态：已在本服实机验证通过**（2026-10-11，`resource_world` 下三把不同拔刀剑
 > 各 `/sbkill set 5555` 一次，**3/3 成功**）。本服有插件接管了 `/item` 与 `/kill`，
 > 方案已针对这种情况定型，详见第二节。
+>
+> 📌 **v1.0.2**：修中转兜底在 1.21.1 上**永久静默失效** + **刀可能卡在中转实体里搬不回来**的
+> 两个 bug（根因：`equipment.mainhand` 是 1.21.5+ 才有的写法，1.21.1 应为 `HandItems[0]`；
+> 且 `data modify … set value` 会凭空补齐不存在的路径，让"写错"伪装成"成功"）。
+> 同时失败时会自动打印本次试过的命令。详见 §二末「兜底」与 §十一-5。
 >
 > 📌 **v1.0.1**：控制台日志降噪 —— `verbose-commands` 默认关闭，写入成功只留一行；
 > 即便打开也把上千字符的组件体折叠成 `[…N 字符…]`。见 §五。
@@ -106,22 +111,39 @@ minecraft:item replace entity <玩家> weapon.mainhand with <物品ID>[<改好�
 
 ### 兜底：命令版中转盔甲架
 
-前两条都不行时才启用（本服不会用到）。它不是 Bukkit 造实体，而是**全命令**实现：
+前两条都不行时才启用。它不是 Bukkit 造实体，而是**全命令**实现（`<主手>` 见下方路径表）：
 
 ```
 ① execute at <玩家> run execute unless entity @e[type=armor_stand,tag=sbke_<玩家>,limit=1] run summon armor_stand ~ ~ ~ {...}
 ② execute at <玩家> run item replace entity @e[tag=sbke_<玩家>,limit=1] weapon.mainhand from entity <玩家> weapon.mainhand
-③ execute at <玩家> run data modify entity @e[tag=sbke_<玩家>,limit=1] equipment.mainhand.components."slashblade:blade_state".<字段> set value <值>
-④ execute at <玩家> run execute if data entity @e[tag=…,limit=1] equipment.mainhand.count run item replace entity <玩家> weapon.mainhand from entity @e[tag=…,limit=1] weapon.mainhand
+③ execute at <玩家> run execute if data entity @e[tag=…,limit=1] <主手>.components."slashblade:blade_state".<字段> run data modify entity @e[tag=…,limit=1] <主手>.components."slashblade:blade_state".<字段> set value <值>
+④ execute at <玩家> run execute if data entity @e[tag=…,limit=1] <主手>.count run item replace entity <玩家> weapon.mainhand from entity @e[tag=…,limit=1] weapon.mainhand
 ```
 
-三个设计要点：
+**`<主手>` 这条路径跨版本变过，写错会静默失效**：
+
+| 服务端版本 | 主手 NBT 路径 | 说明 |
+|---|---|---|
+| **1.21.4 及以前**（含本插件目标 **1.21.1**） | **`HandItems[0]`** | 老字段，插件**优先用这条** |
+| 1.21.5 起 | `equipment.mainhand` | 官方把 `ArmorItems` / `HandItems` / `body_armor_item` **合并成了 `equipment`** |
+
+> ⚠️ **为什么"写错也不报错"**：`data modify ... set value` 会**自动补齐不存在的中间复合标签**。
+> 在 1.21.1 上对它执行 `... equipment.mainhand.components."slashblade:blade_state".killCount set value 5300`
+> —— 命令回的是 `Modified entity data of Armor Stand`，**看起来成功了**，
+> 但那个 `equipment` 键只是被凭空造在实体根上，真正的主手（`HandItems[0]`）一点没动。
+>
+> **v1.0.0 / v1.0.1 就栽在这里**：中转通道在 1.21.1 上一直静默失效，
+> 还因为 `moveBack` 的判断也用了同一条错路径（`equipment.mainhand.count` 恒为假），
+> 刀被搬进中转实体后**搬不回来**。修法见下。
+
+三条设计要点：
 
 | 设计 | 为什么 |
 |------|--------|
-| **每玩家一个常驻**隐形 Marker 盔甲架 + `unless entity` **懒召唤** | 热路径**完全不需要 `/kill`**。本服 `/kill` 被插件接管，裸 `kill @e[…]` 会被当玩家名查、必失败 |
-| 第 ④ 步前面加 `execute if data entity … equipment.mainhand.count` | **绝不用空手覆盖玩家主手**。没有这道判断，万一中转没接到刀，第 ④ 步会把玩家的刀换成空气（等于销毁） |
+| 每条 `data modify` 前都加 `execute if data entity <中转> <字段路径>` | **让「路径不对」表现为「什么都不做」而不是「假装成功」**。没有这道判断，`set value` 会凭空造路径，命令回成功而实际没改 |
+| 第 ④ 步按**两条路径各做一次** `execute if data … <路径>.count` | 既**绝不用空手覆盖玩家主手**（判断成立才搬），又**不会因猜错路径把刀永久留在中转里**。刀只会存在于其中一条路径上，所以只会命中一次 |
 | 中转实体在插件卸载时由 Bukkit 统一 `remove()` | 不用命令，不依赖任何被接管的命令 |
+| 抢救走**纯 Bukkit**（`findRelay` + `getEquipment()`），不复用命令 | 上一版抢救也用同一条错路径做判断，于是抢救本身静默失效 —— 抢救不能依赖被抢救的那条路径 |
 
 ### 要点
 
@@ -136,7 +158,7 @@ minecraft:item replace entity <玩家> weapon.mainhand with <物品ID>[<改好�
 
 ## 三、安装
 
-1. 把 `SlashBladeKillEditor-1.0.1.jar` 放进服务端 `plugins/` 目录
+1. 把 `SlashBladeKillEditor-1.0.2.jar` 放进服务端 `plugins/` 目录
 2. 重启服务端（Arclight）
 3. 控制台出现下面这行即成功：
    ```
@@ -285,7 +307,7 @@ messages:                     # 全部文案可改，支持 & 颜色码
 | 若服务器接管了 `/item` | 插件**先试 `minecraft:item`**（实测可绕过）；只有命名空间写法也无效时才退回普通写法 |
 | 写入结果延迟 1~3 tick | 本服 Arclight 的 Bukkit 物品镜像要等 tick 结束才回灌，所以"写入成功/失败"提示会晚一拍（约 50 ms）；每换一个方案再等一拍，最坏约 150 ms |
 | 兜底路径会留下一个隐形实体 | 只有前两条通道都失败时才启用；每玩家一个 `Marker+Invisible+Silent` 盔甲架，**不可见、无碰撞、无声音**，插件卸载时自动清理。主路径不生成任何实体 |
-| **不会丢物品** | 兜底的搬回操作前有 `execute if data entity … equipment.mainhand.count` 判断，**绝不会用空手覆盖玩家主手**；万一真丢了还会自动抢救并打印手工恢复命令 |
+| **不会丢物品** | 搬回前按**两条装备路径**各做一次 `execute if data entity … <路径>.count` 判断，**绝不会用空手覆盖玩家主手**；万一刀真卡在中转实体里，抢救走**纯 Bukkit** 把它读出来直接放回主手（不依赖任何路径猜测），失败会把物品退回中转实体、绝不凭空吞掉 |
 | 仅 Java 版有效 | 所用命令均为 Java 版专属，基岩版不适用 |
 | 极少数情况客户端不刷新 | 已内置 `sync-inventory-after-write: true` 兜底 |
 | 数值含义 | `killCount` 会影响部分刀的特效/成长；`proudSoul` 是精炼消耗品；`refine` 影响加成。改前建议先 `/sbkill get` 记下原值 |
@@ -309,7 +331,7 @@ messages:                     # 全部文案可改，支持 & 颜色码
 ```bash
 cd "D:/WorkBuddy/我的世界/SlashBladeKillEditor"
 ./gradlew build
-# 产物：build/libs/SlashBladeKillEditor-1.0.1.jar
+# 产物：build/libs/SlashBladeKillEditor-1.0.2.jar
 ```
 
 - 需要 JDK 21（本机已装 Temurin 21）
@@ -340,13 +362,18 @@ src/main/java/cn/qzrs/sbkilleditor/
 minecraft:kill @e[type=armor_stand,tag=sbke_man]
 execute at <你> run summon armor_stand ~ ~ ~ {Tags:["sbke_man"],Marker:1b,Invisible:1b,Silent:1b,ShowArms:1b}
 execute at <你> run item replace entity @e[type=armor_stand,tag=sbke_man,limit=1] weapon.mainhand from entity <你> weapon.mainhand
-execute at <你> run data modify entity @e[type=armor_stand,tag=sbke_man,limit=1] equipment.mainhand.components."slashblade:blade_state".killCount set value <杀敌数>
+execute at <你> run data modify entity @e[type=armor_stand,tag=sbke_man,limit=1] HandItems[0].components."slashblade:blade_state".killCount set value <杀敌数>
 # 搬回前必须确认中转手上真有东西，否则会把你的主手清空！
-execute at <你> run execute if data entity @e[type=armor_stand,tag=sbke_man,limit=1] equipment.mainhand.count run item replace entity <你> weapon.mainhand from entity @e[type=armor_stand,tag=sbke_man,limit=1] weapon.mainhand
+execute at <你> run execute if data entity @e[type=armor_stand,tag=sbke_man,limit=1] HandItems[0].count run item replace entity <你> weapon.mainhand from entity @e[type=armor_stand,tag=sbke_man,limit=1] weapon.mainhand
 minecraft:kill @e[type=armor_stand,tag=sbke_man]
 ```
 
-> 若第 4 行报「找不到路径」，把 `equipment.mainhand` 换成 `HandItems[0]`（1.21 之前的老写法）。
+> **第 4 行的主手路径按服务端版本选**：**1.21.4 及以前用 `HandItems[0]`**（本插件目标 1.21.1 就是这条），
+> **1.21.5 起换成 `equipment.mainhand`**（官方把 `HandItems`/`ArmorItems` 合并进了 `equipment`）。
+> ⚠️ **写错的症状是"静默失效"不是报错** —— 命令照样回 `Modified entity data`，但实际什么都没改。
+> 判断依据：`HandItems[0]` 在 1.21.1 上**一定存在**（即使手上没东西，它也是 `[{},{}]`）；
+> 而 `equipment` 在 1.21.1 上是**根本不该存在**的键。
+>
 > 另外注意：**直接用 `/data modify entity <玩家>` 是行不通的**，Minecraft 明确禁止修改玩家数据。
 
 **更省事的做法（本服实际可用的路径）**：直接给 `/item` 加命名空间就能绕过接管它的插件，
@@ -365,17 +392,34 @@ minecraft:item replace entity <你> weapon.mainhand with slashblade:slashblade[s
 ```mcfunction
 execute at <你> run summon armor_stand ~ ~ ~ {Tags:["sbke_man"],Marker:1b,Invisible:1b,Silent:1b,ShowArms:1b}
 execute at <你> run item replace entity @e[type=armor_stand,tag=sbke_man,limit=1] weapon.mainhand from entity <你> weapon.mainhand
-execute at <你> run data modify entity @e[type=armor_stand,tag=sbke_man,limit=1] equipment.mainhand.components."slashblade:blade_state".killCount set value <杀敌数>
+execute at <你> run data modify entity @e[type=armor_stand,tag=sbke_man,limit=1] HandItems[0].components."slashblade:blade_state".killCount set value <杀敌数>
 # 搬回前先确认中转手上真有东西，否则会把你的主手清空！
-execute at <你> run execute if data entity @e[type=armor_stand,tag=sbke_man,limit=1] equipment.mainhand.count run item replace entity <你> weapon.mainhand from entity @e[type=armor_stand,tag=sbke_man,limit=1] weapon.mainhand
+execute at <你> run execute if data entity @e[type=armor_stand,tag=sbke_man,limit=1] HandItems[0].count run item replace entity <你> weapon.mainhand from entity @e[type=armor_stand,tag=sbke_man,limit=1] weapon.mainhand
 minecraft:kill @e[type=armor_stand,tag=sbke_man,limit=1]
 ```
 
 > ⚠️ 清理那行**必须写 `minecraft:kill`**。本服实测裸 `kill` 被插件接管，会把 `@e[...]` 当玩家名去查，
 > 提示 `Can't find player with this name!` / `The player is not online!`，实体根本删不掉。
 >
-> ⚠️ 命令版中转有个固有风险：第 3 步会把刀**从玩家手上搬走**，万一最后一步失败，刀就卡在盔甲架里了；
-> 所以搬回那行一定要带 `execute if data entity … equipment.mainhand.count` 判断，避免把空手换上主手。
+> ⚠️ 命令版中转有个固有风险：第 3 步会把刀**从玩家手上搬走**，万一最后一步失败，刀就卡在盔甲架里了。
+> 所以：① 搬回那行一定要带 `execute if data entity … <主手>.count` 判断，避免把空手换上主手；
+> ② 判断用的路径**必须和第 3 步一致**，否则判断恒为假、搬回静默失效，刀永久留卡在盔甲架里
+> —— 这正是 v1.0.0 / v1.0.1 的实际事故：第 3 步写 `equipment.mainhand`（1.21.1 上无效），
+> 第 4 步拿同一条路径做判断 → `equipment.mainhand.count` 恒为假 → 刀搬不回来。
+> v1.0.2 起两条路径都试、且抢救改走纯 Bukkit，不再依赖路径猜测。
+
+**刀卡在盔甲架里了怎么救**（先只读检查，确认了再搬）：
+
+```mcfunction
+# 1) 先看中转实体到底存不存在、手上有什么（只读，无副作用）
+/data get entity @e[type=armor_stand,tag=sbke_<你>,limit=1]
+
+# 2) 确认 HandItems[0] 里确实是你的刀 → 搬回主手
+execute at <你> run execute if data entity @e[type=armor_stand,tag=sbke_<你>,limit=1] HandItems[0].count run item replace entity <你> weapon.mainhand from entity @e[type=armor_stand,tag=sbke_<你>,limit=1] weapon.mainhand
+
+# 3) 刀确认回到手上了，再清理中转实体（用 minecraft: 前缀）
+minecraft:kill @e[type=armor_stand,tag=sbke_<你>]
+```
 
 插件的价值在于：**权限分级 + 数值上限/负数校验 + 代他人操作 + Tab 补全 + 统一文案 + 写入回读校验**。
 
@@ -453,18 +497,41 @@ Replaced a slot on QZRS with [『Uesugi Erii?Sakura』]                         
 
 ### 5) 提示「写入失败」
 
+**v1.0.2 起失败会自己说话**：写入彻底失败时插件会自动把本次实际派发的每一条命令
+（折叠后的骨架 + 字符数）打进控制台，所以**不需要提前开 `verbose-commands`**，
+直接照抄那段日志即可复盘。日志形如：
+
+```log
+[SlashBladeKillEditor]: [写入失败] QZRS 杀敌数=5300 —— 三条通道均未生效。本次实际派发了 6 条命令：
+[SlashBladeKillEditor]:   (1) [2412 字符] /minecraft:item replace entity QZRS weapon.mainhand with slashblade:slashblade[…2391 字符…]
+[SlashBladeKillEditor]:   (2) [2402 字符] /item replace entity QZRS weapon.mainhand with slashblade:slashblade[…2391 字符…]
+[SlashBladeKillEditor]:   (3) [231 字符] /execute at QZRS run execute unless entity @e[type=armor_stand,tag=sbke_QZRS,limit=1] run summon armor_stand ~ ~ ~ {...}
+...
+[SlashBladeKillEditor]: [写入失败] 主命令完整长度 2412 字符；完整内容请执行 /sbkill debug 查看。
+```
+
 按方案顺序排查，每步都以**回读结果**为准：
 
 | 方案 | 失败表现 | 处理 |
 |------|----------|------|
-| 1 `minecraft:item` | 日志有 `[CMD] 派发失败 /minecraft:item …` | 该服禁用了 `minecraft:` 前缀命令；插件会自动退回普通写法，无需处理 |
-| 2 普通 `item` | 控制台 `We can't give you this, its not an item` | 被「防刷物」插件拦；说明命名空间写法也不通，插件会进入中转兜底 |
-| 3 中转盔甲架 | `[抢救] … 主手为空…` | 中转搬运未成功，刀可能卡在中转实体里；按日志里给出的手工命令可搬回 |
-| 3 中转盔甲架 | 日志里 `data modify` 报路径错误 | 该刀组件结构不匹配，跑 `/sbkill debug` 把日志发回 |
+| 1 `minecraft:item` | 日志有 `[CMD] 未被识别 /minecraft:item …` | 该服禁用了 `minecraft:` 前缀命令（`dispatchCommand` 直接返回 false）；插件会自动退回普通写法，无需处理 |
+| 1/2 命令 | 控制台 `We can't give you this, its not an item` | 被「防刷物」插件拦；说明命名空间写法也不通，插件会进入中转兜底 |
+| 1/2 命令 | **主命令上千字符仍失败** | 先把日志发回！这条本身就是最有价值的线索（命令长度 / 里面出现了引号嵌套 / 某个模组组件序列化不回去，三者都可能） |
+| 3 中转盔甲架 | 日志 `[抢救] 检测到「…」还卡在中转实体…已搬回主手` | 中转通道全挂了但**刀没丢**，插件已自动搬回。把日志发回即可 |
+| 3 中转盔甲架 | 日志 `[抢救] … 但没找到中转实体` | 刀没丢（从没搬进中转），属于第 1/2 通道的问题 |
 
 先跑 `/sbkill debug`，重点看这几行：
-`组件(getAsComponentString)` 是否有完整 SNBT、`解析 killCount=` 是否读到数、
-`写入方案顺序=`、`中转标签=`，再对症处理。
+
+| 诊断行 | 怎么用 |
+|---|---|
+| `组件(getAsComponentString)` | 有没有拿到完整 SNBT；为空说明读都读不到 |
+| `解析 killCount=` | 读到数说明组件结构识别正常，问题只在写 |
+| `写入命令长度:` | **新加**。「普通 xxx 字符 / 命名空间 xxx 字符」—— 上千字符时优先怀疑长度或引号嵌套 |
+| `服务端版本:` | **新加**。一比对就知道中转该用哪条装备路径 |
+| `中转装备路径候选:` | **新加**。当前实际尝试的顺序 |
+| `中转实体(sbke_xxx):` | **新加**。`不存在` / `存在…主手=<物品> x<n>`。**主手不是空而玩家手上没刀 → 刀就卡在这里**，用 §十 的抢救命令搬回 |
+
+> `写入方案顺序=`、`中转标签=` 也一并打印，便于对照。
 
 ### 6) 改任何 YAML 后的自检命令
 
@@ -474,4 +541,4 @@ python -c "import yaml,sys;yaml.safe_load(open(sys.argv[1],encoding='utf-8'));pr
 ```
 
 更省事的做法：改完 YAML 直接在本地跑一次 `./gradlew build`，
-再用 `unzip -p build/libs/SlashBladeKillEditor-1.0.1.jar plugin.yml` 肉眼复核。
+再用 `unzip -p build/libs/SlashBladeKillEditor-1.0.2.jar plugin.yml` 肉眼复核。
