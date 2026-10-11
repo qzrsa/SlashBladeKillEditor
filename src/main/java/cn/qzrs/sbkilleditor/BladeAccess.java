@@ -50,6 +50,12 @@ import java.util.regex.Pattern;
  * 于是「写完立刻回读」会误判失败 —— 这正是早期版本"命令成功却报写入失败"的根因。
  * 所以：先同步校验（常规服务端立刻命中、零延迟），不过则
  * {@code runTaskLater(…, 1L)} 在下一 tick 复验，通过回调把结果交回命令层。
+ *
+ * <h2>日志策略：成功时一条就够</h2>
+ * 写入成功在控制台只留一条 {@code [写入成功] 玩家 杀敌数 0 → 5555}（首选通道命中时不写通道名，
+ * 只有降级才标注）。{@code [CMD]} 命令回显默认<strong>关闭</strong>；
+ * 打开时也走 {@link #compact} <b>折叠</b>组件体（898 字符 → 88 字符），不会刷屏。
+ * 需要完整命令请用 {@code /sbkill debug}。
  */
 public final class BladeAccess {
 
@@ -93,6 +99,19 @@ public final class BladeAccess {
 
     /** 中转实体标签前缀（后接玩家名，保证每个玩家一个常驻实体）。 */
     private static final String RELAY_TAG_PREFIX = "sbke_";
+
+    /**
+     * 首选写入通道的名字。命中它 = 一切正常，日志可以最精简
+     * （命令层据此决定 {@code [写入成功]} 里要不要标出通道）。
+     */
+    public static final String PRIMARY_CHANNEL = "minecraft:item";
+
+    /**
+     * 日志回显单行上限。<b>只是个兜底</b>：折叠组件体后行长度约 90 字符，
+     * 中转用的 {@code summon} / 搬回命令约 230 字符 —— 两者都远在阈值内，会完整打印。
+     * 只有出现意料之外的长命令时才截断。
+     */
+    private static final int MAX_ECHO = 400;
 
     private final SlashBladeKillEditor plugin;
     private final PluginConfig cfg;
@@ -197,11 +216,11 @@ public final class BladeAccess {
                 return;
             }
         } else {
-            plugin.getLogger().info("[写入] 命令写入未获确认，改用中转盔甲架…");
+            plugin.getLogger().info("[写入] 命令通道未生效，降级为中转盔甲架…");
             relayWrite(p, f, value);
             if (verify(p, f, value)) {
                 lastError = null;
-                cb.done(true, "中转盔甲架");
+                cb.done(true, channelLabel(null));
                 return;
             }
         }
@@ -213,30 +232,25 @@ public final class BladeAccess {
             }
             if (verify(p, f, value)) {
                 lastError = null;
-                cb.done(true, label(cmd) + " + 延后复验");
+                cb.done(true, channelLabel(cmd));
                 return;
             }
             runPlan(p, f, value, plan, next, cb);
         }, 1L);
     }
 
-    /** 方案表中某一步的可读名字。 */
-    private static String label(String cmd) {
-        return (cmd == null) ? "中转盔甲架" : channelLabel(cmd);
-    }
-
     /** 把完整命令折算成短标签，避免日志被上千字符的组件 SNBT 刷屏。 */
     private static String channelLabel(String cmd) {
         if (cmd == null) {
-            return "未知通道";
+            return "中转盔甲架";
         }
         if (cmd.startsWith("minecraft:")) {
-            return "minecraft:item（命名空间）";
+            return PRIMARY_CHANNEL;
         }
         if (cmd.startsWith("item ")) {
-            return "item（普通写法）";
+            return "item";
         }
-        return cmd;
+        return "未知通道";
     }
 
     // =====================================================================
@@ -438,7 +452,16 @@ public final class BladeAccess {
 
     /** 从 openIdx 处的 '{' 起做括号配平（跳过字符串与转义），返回配对 '}' 的下标。 */
     private static int matchBrace(String s, int openIdx) {
-        if (openIdx < 0 || openIdx >= s.length() || s.charAt(openIdx) != '{') {
+        return matchPair(s, openIdx, '{', '}');
+    }
+
+    /**
+     * 通用括号配平：从 {@code openIdx} 处的 {@code open} 起扫，返回配对闭括号的下标；
+     * 找不到返回 -1。<b>会跳过字符串字面量与其内的转义</b>，
+     * 所以 SNBT 里的 {@code "texture": "slashblade:model/{wood}.png"} 不会误计数。
+     */
+    private static int matchPair(String s, int openIdx, char open, char close) {
+        if (openIdx < 0 || openIdx >= s.length() || s.charAt(openIdx) != open) {
             return -1;
         }
         int depth = 0;
@@ -455,9 +478,9 @@ public final class BladeAccess {
             }
             if (c == '"') {
                 inStr = true;
-            } else if (c == '{') {
+            } else if (c == open) {
                 depth++;
-            } else if (c == '}') {
+            } else if (c == close) {
                 depth--;
                 if (depth == 0) {
                     return i;
@@ -477,6 +500,7 @@ public final class BladeAccess {
         out.add("opsOnly=" + cfg.opsOnly
                 + "  写入方案顺序=minecraft:item → item → 中转盔甲架"
                 + "  中转标签=" + relayTag(p));
+        out.add("[CMD]回显=" + cfg.verboseCommands + "（false 时不会在控制台刷命令）");
 
         ItemStack main = p.getInventory().getItemInMainHand();
         out.add("主手: " + main.getType() + " x" + main.getAmount());
@@ -538,25 +562,63 @@ public final class BladeAccess {
     //  命令派发
     // =====================================================================
 
+    /**
+     * 派发一条原版命令。
+     *
+     * <p>日志策略：默认<strong>不回显</strong>（{@code verbose-commands: false}）——
+     * 写入成功只需一条 {@code [写入成功]}。即便打开回显，也是走 {@link #compact} 的
+     * <b>折叠</b>版本而非全量，所以控制台不会被上千字符的组件 SNBT 淹没。
+     * 需要完整命令时用 {@code /sbkill debug}。
+     */
     private void dispatch(CommandSender s, String commandLine) {
         if (s == null || commandLine == null) {
             return;
         }
         if (cfg.verboseCommands) {
-            plugin.getLogger().info("[CMD] /" + brief(commandLine));
+            plugin.getLogger().info("[CMD] /" + compact(commandLine));
         }
         try {
             Bukkit.dispatchCommand(s, commandLine);
         } catch (Throwable t) {
             this.lastDispatchError = t.getClass().getSimpleName() + ": " + t.getMessage();
-            plugin.getLogger().warning("[CMD] 派发失败 /" + brief(commandLine)
+            plugin.getLogger().warning("[CMD] 派发失败 /" + compact(commandLine)
                     + " -> " + lastDispatchError);
         }
     }
 
-    /** 日志用短命令：超长（组件 SNBT 动辄上千字符）时截断并标注总长度。 */
-    private static String brief(String commandLine) {
-        final int max = 220;
+    /**
+     * 日志用的命令回显：把组件体折叠掉，只留可读骨架。
+     *
+     * <pre>
+     * 折叠前：minecraft:item replace entity QZRS weapon.mainhand with slashblade:slashblade[minecraft:enchantments={…},slashblade:blade_state={…}]   ← 898 字符
+     * 折叠后：minecraft:item replace entity QZRS weapon.mainhand with slashblade:slashblade[…743 字符…]                                        ←  88 字符
+     * </pre>
+     *
+     * <p>只折叠 {@code with <物品ID>[ … ]} 里那对<b>最外层方括号</b>，其余命令
+     * （{@code summon} / {@code data modify} / 中转搬运用命令）原样保留。
+     */
+    private static String compact(String cmd) {
+        int open = componentBracket(cmd);
+        if (open < 0) {
+            return brief(cmd, MAX_ECHO);
+        }
+        int close = matchPair(cmd, open, '[', ']');
+        if (close < 0) {
+            return brief(cmd, MAX_ECHO);
+        }
+        int payload = close - open - 1;
+        return brief(cmd.substring(0, open) + "[…" + payload + " 字符…]" + cmd.substring(close + 1),
+                MAX_ECHO);
+    }
+
+    /** 定位 {@code with <物品ID>[ … ]} 里那个 '['；不是带组件体的 item 命令则返回 -1。 */
+    private static int componentBracket(String cmd) {
+        int w = cmd.indexOf(" with ");
+        return (w < 0) ? -1 : cmd.indexOf('[', w + " with ".length());
+    }
+
+    /** 日志用短命令：超长时截断并标注总长度。 */
+    private static String brief(String commandLine, int max) {
         if (commandLine.length() <= max) {
             return commandLine;
         }

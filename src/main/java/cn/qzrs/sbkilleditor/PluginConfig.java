@@ -24,8 +24,14 @@ public final class PluginConfig {
     /** 仅允许服务端 OP 执行（默认严格模式）。 */
     public boolean opsOnly = true;
     public boolean syncInventory = true;
-    /** 把每条派发出去的原版命令打到控制台，便于排错（默认开）。 */
-    public boolean verboseCommands = true;
+    /**
+     * 是否把派发出去的原版命令回显到控制台（前缀 {@code [CMD]}）。
+     *
+     * <p>默认 <b>false</b>：写入成功时只留一条精简的 {@code [写入成功]}，控制台干净。
+     * 打开后也不是全量打印 —— 组件 SNBT 会被折叠成 {@code […N 字符…]}，一行约 90 字符。
+     * 排障时不必开这个，直接 {@code /sbkill debug} 就能拿到完整写入命令。
+     */
+    public boolean verboseCommands = false;
 
     private String prefix = "&8[&c拔刀剑&8] &r";
 
@@ -46,7 +52,7 @@ public final class PluginConfig {
 
         this.opsOnly = conf.getBoolean("ops-only", true);
         this.syncInventory = conf.getBoolean("sync-inventory-after-write", true);
-        this.verboseCommands = conf.getBoolean("verbose-commands", true);
+        this.verboseCommands = conf.getBoolean("verbose-commands", false);
 
         this.prefix = conf.getString("messages.prefix", this.prefix);
     }

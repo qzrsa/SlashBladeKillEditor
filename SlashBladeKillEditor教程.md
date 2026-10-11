@@ -2,11 +2,14 @@
 
 > 在线修改手持拔刀剑的 **杀敌数 / 耀魂 / 锻造数**
 > 目标环境：**Arclight NeoForge 1.21.1** + **SlashBlade: Resharped 2.0.x**
-> 产物：`SlashBladeKillEditor-1.0.0.jar`（已编译好，直接丢 plugins）
+> 产物：`SlashBladeKillEditor-1.0.1.jar`（已编译好，直接丢 plugins）
 >
-> ✅ **状态：已在本服实机验证通过**（2026-10-11 15:58，`/sbkill set 5555` → 聊天栏成功提示
-> + 控制台 `[写入成功] QZRS KILL 5000 -> 5555`）。本服有插件接管了 `/item` 与 `/kill`，
+> ✅ **状态：已在本服实机验证通过**（2026-10-11，`resource_world` 下三把不同拔刀剑
+> 各 `/sbkill set 5555` 一次，**3/3 成功**）。本服有插件接管了 `/item` 与 `/kill`，
 > 方案已针对这种情况定型，详见第二节。
+>
+> 📌 **v1.0.1**：控制台日志降噪 —— `verbose-commands` 默认关闭，写入成功只留一行；
+> 即便打开也把上千字符的组件体折叠成 `[…N 字符…]`。见 §五。
 
 ---
 
@@ -90,14 +93,16 @@ minecraft:item replace entity <玩家> weapon.mainhand with <物品ID>[<改好�
 修法：**写入后先同步校验一次**（常规服务端在这里就过了，零延迟），
 **不过则等下一 tick 复验**，通过才换下一个方案。所以你看到的成功提示会晚约 50 ms。
 
-> 本服最终日志（2026-10-11 15:58 实测通过）：
+> 本服最终日志（2026-10-11 实测通过）：
 > ```
-> [CMD] /minecraft:item replace entity QZRS weapon.mainhand with slashblade:slashblade[ … ]
 > Replaced a slot on QZRS with [『Uesugi Erii?Sakura』]          ← 原版反馈
-> [写入成功] QZRS KILL 5000 -> 5555（通道：minecraft:item（命名空间） + 延后复验）
+> [写入成功] QZRS 杀敌数 5000 → 5555
 > ```
-> 注意 `KILL 5000 -> 5555`：旧值 5000 正是上一轮写入的结果，说明**写入一直是成功的**，
+> 就这么两行。注意 `5000 → 5555`：旧值 5000 正是上一轮写入的结果，说明**写入一直是成功的**，
 > 早期版本报的"写入失败"纯属校验误判。
+>
+> 首选通道命中时**不写通道名**；只有降级了才会出现 `（降级通道：中转盔甲架）`。
+> `verbose-commands` 默认关闭，所以没有 `[CMD]` 行 —— 见 [§五 配置](#五配置pluginsslashbladekilleditorconfigyml)。
 
 ### 兜底：命令版中转盔甲架
 
@@ -123,14 +128,15 @@ minecraft:item replace entity <玩家> weapon.mainhand with <物品ID>[<改好�
 - **零 NMS 依赖**，不碰模组内部类，Arclight / Spigot / Paper 通用
 - 所有通道**以回读结果为准**；单次读取不可信时自动延后一拍复验
 - 读取（`/sbkill get`）**完全不执行命令、不生成实体**
-- 所有命令都以 `[CMD] /…` 打到控制台（`verbose-commands: true` 时），排错一目了然
-- 写入成功/失败都会在控制台留一行 `[写入成功] …（通道：…）` / `[写入失败] … -> 原因`
+- 写入成功只在控制台留**一行** `[写入成功] 玩家 杀敌数 0 → 5555`；失败留一行 `[写入失败] … -> 原因`
+- `[CMD]` 命令回显**默认关闭**（`verbose-commands: false`）。即便打开也走**折叠**：
+  上千字符的组件体压成 `[…N 字符…]`（898 → 88 字符），不会刷屏；完整命令用 `/sbkill debug` 拿
 
 ---
 
 ## 三、安装
 
-1. 把 `SlashBladeKillEditor-1.0.0.jar` 放进服务端 `plugins/` 目录
+1. 把 `SlashBladeKillEditor-1.0.1.jar` 放进服务端 `plugins/` 目录
 2. 重启服务端（Arclight）
 3. 控制台出现下面这行即成功：
    ```
@@ -193,13 +199,29 @@ limits:
   max-refine: 1000000
   allow-negative: false       # 是否允许负数
 sync-inventory-after-write: true   # 改完强制刷新背包，让 tooltip 立即变
-verbose-commands: true      # 把派发出去的每条命令打到控制台（[CMD] 前缀），排错用
+verbose-commands: false     # 是否回显派发出去的命令（[CMD] 前缀）。默认关
 messages:                     # 全部文案可改，支持 & 颜色码
   prefix: "&8[&c拔刀剑&8] &r"
 ```
 
-> `verbose-commands` 默认 **开**。确认一切正常后可改成 `false` 让日志安静下来；
-> 排查写入问题时**务必先开着**，控制台会逐条打印插件执行了什么命令。
+> `verbose-commands` 默认 **关**。写入成功只留一条 `[写入成功]`，控制台干净。
+> 打开后也不是全量打印 —— 组件 SNBT 会被**折叠**成 `[…N 字符…]`：
+>
+> ```
+> # false（默认）
+> Replaced a slot on QZRS with [『Uesugi Erii?Sakura』]
+> [写入成功] QZRS 杀敌数 0 → 5555
+>
+> # true（同样干净，只是多一行命令骨架）
+> [CMD] /minecraft:item replace entity QZRS weapon.mainhand with slashblade:slashblade[…737 字符…]
+> Replaced a slot on QZRS with [『Uesugi Erii?Sakura』]
+> [写入成功] QZRS 杀敌数 0 → 5555
+>
+> # v1.0.0 的写法（v1.0.1 起已折叠）：一行 230 字符，看得头疼
+> [CMD]/minecraft:item replace entity QZRS weapon.mainhand with slashblade:slashblade[minecraft:enchantments={levels: {"minecraft:unbreaking": 5}},minecraft:damage=239,minecraft:max_damage=240,slashblade:blade_state={adjust: [0. …
+> ```
+>
+> **排障不需要开这个** —— `/sbkill debug` 会把两条完整写入命令原样打出来。
 
 ---
 
@@ -213,10 +235,10 @@ messages:                     # 全部文案可改，支持 & 颜色码
    成功 → 显示「杀敌数 x | 耀魂 y | 锻造数 z」，收工
 ③ /sbkill set 5000
    成功 → 聊天栏提示已写入，tooltip 立刻变；控制台能看到（本服实测输出）：
-          [SlashBladeKillEditor]: [CMD] /minecraft:item replace entity <你> weapon.mainhand with …(共 1xxx 字符)
-          Replaced a slot on <你> with [『…』]                          ← 原版反馈，不带 §x
-          [SlashBladeKillEditor]: [写入成功] <你> KILL 0 -> 5000（通道：minecraft:item（命名空间） + 延后复验）
+          Replaced a slot on <你> with [『…』]              ← 原版反馈，不带 §x
+          [SlashBladeKillEditor]: [写入成功] <你> 杀敌数 0 → 5000
    ↑ 正常情况下只发一条命令；成功这一行会晚约 50 ms（校验延后一拍），属正常
+   ↑ 只有降级才会变成 [写入成功] <你> 杀敌数 0 → 5000（降级通道：中转盔甲架）
 ④ 若提示「手上没有拿着拔刀剑 / 未找到刀刃数据组件」：
    执行 /sbkill debug（仅 OP）
    → 聊天栏与服务端 latest.log 会输出：
@@ -237,8 +259,11 @@ messages:                     # 全部文案可改，支持 & 颜色码
 | `§xWe can't give you this, its not an item` | 插件 | 普通 `/item` 被拦（已被 `minecraft:` 写法绕过） |
 | `§xCan't find player with this name! … (kill -> @e[…])` | 插件 | 裸 `/kill` 被接管（插件已不再用它） |
 
-**排错时最有用的一行**：把 `verbose-commands` 保持为 `true`，控制台里所有 `[CMD] /…`
-就是插件实际执行的命令，从前往后逐条看，哪条之后结果不对，问题就在那里。
+**排错时最有用的一招**：直接 `/sbkill debug`。它会把插件打算执行的两条完整写入命令
+（命名空间写法 + 普通写法）原样打印到控制台和聊天栏，**不需要开 `verbose-commands`**、
+也不会被折叠。若确实想看运行期实际派发了什么，再把 `verbose-commands` 临时改成 `true`，
+控制台里所有 `[CMD] /…` 就是插件实际执行的命令（组件体已折叠，不算刷屏），
+从前往后逐条看，哪条之后结果不对，问题就在那里。
 
 手动核对命令（任何时候可用）：
 
@@ -284,7 +309,7 @@ messages:                     # 全部文案可改，支持 & 颜色码
 ```bash
 cd "D:/WorkBuddy/我的世界/SlashBladeKillEditor"
 ./gradlew build
-# 产物：build/libs/SlashBladeKillEditor-1.0.0.jar
+# 产物：build/libs/SlashBladeKillEditor-1.0.1.jar
 ```
 
 - 需要 JDK 21（本机已装 Temurin 21）
@@ -416,7 +441,7 @@ description: '修改……（SlashBlade Resharped 1.21.1）'
 
 ```
 Replaced a slot on QZRS with [『Uesugi Erii?Sakura』]                                  ← 原版反馈
-[SlashBladeKillEditor]: [写入成功] QZRS KILL 5000 -> 5555（通道：minecraft:item（命名空间） + 延后复验）
+[SlashBladeKillEditor]: [写入成功] QZRS 杀敌数 5000 → 5555
 ```
 
 **手工验证哪个命令被接管**（安全、无副作用）：
@@ -449,4 +474,4 @@ python -c "import yaml,sys;yaml.safe_load(open(sys.argv[1],encoding='utf-8'));pr
 ```
 
 更省事的做法：改完 YAML 直接在本地跑一次 `./gradlew build`，
-再用 `unzip -p build/libs/SlashBladeKillEditor-1.0.0.jar plugin.yml` 肉眼复核。
+再用 `unzip -p build/libs/SlashBladeKillEditor-1.0.1.jar plugin.yml` 肉眼复核。

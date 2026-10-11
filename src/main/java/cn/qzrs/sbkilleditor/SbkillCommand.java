@@ -196,11 +196,11 @@ public final class SbkillCommand implements CommandExecutor, TabCompleter {
             if (!ok) {
                 sender.sendMessage(cfg.msg("write-failed", "reason", stage));
                 plugin.getLogger().warning("[写入失败] " + target.getName()
-                        + " KILL=" + value + " -> " + stage);
+                        + " 杀敌数=" + value + " -> " + stage);
                 return;
             }
             plugin.getLogger().info("[写入成功] " + target.getName()
-                    + " KILL " + old + " -> " + value + "（通道：" + stage + "）");
+                    + " 杀敌数 " + old + " → " + value + channelSuffix(stage));
             access.sync(target);
             if (relative) {
                 sender.sendMessage(cfg.msg("kill-added",
@@ -244,16 +244,38 @@ public final class SbkillCommand implements CommandExecutor, TabCompleter {
             if (!ok) {
                 sender.sendMessage(cfg.msg("write-failed", "reason", stage));
                 plugin.getLogger().warning("[写入失败] " + target.getName()
-                        + " " + field + "=" + v + " -> " + stage);
+                        + " " + fieldName(field) + "=" + v + " -> " + stage);
                 return;
             }
             plugin.getLogger().info("[写入成功] " + target.getName()
-                    + " " + field + "=" + v + "（通道：" + stage + "）");
+                    + " " + fieldName(field) + " = " + v + channelSuffix(stage));
             access.sync(target);
             sender.sendMessage(cfg.msg(field == BladeAccess.Field.SOUL ? "soul-set" : "refine-set",
                     "player", target.getName(),
                     "value", String.valueOf(v)));
         });
+    }
+
+    // =====================================================================
+    //  日志工具
+    // =====================================================================
+
+    /** 字段的中文名，仅用于控制台日志。 */
+    private static String fieldName(BladeAccess.Field f) {
+        return switch (f) {
+            case KILL -> "杀敌数";
+            case SOUL -> "耀魂";
+            case REFINE -> "锻造数";
+        };
+    }
+
+    /**
+     * 成功日志里要不要带通道名。
+     * 命中首选通道（正常情况）返回空串，只有降级时才标出来 —— 让日常日志尽量短。
+     */
+    private static String channelSuffix(String stage) {
+        return BladeAccess.PRIMARY_CHANNEL.equals(stage)
+                ? "" : "（降级通道：" + stage + "）";
     }
 
     // =====================================================================

@@ -24,9 +24,11 @@ limits:
 # 若发现刷新有副作用（极罕见），可改为 false。
 sync-inventory-after-write: true
 
-# 把插件派发出去的每一条原版命令都打到控制台（前缀 [CMD]），便于排错。
-# 默认开。确认一切正常后可改为 false 让日志安静下来。
-verbose-commands: true
+# 是否把插件派发出去的原版命令回显到控制台（前缀 [CMD]）。
+#   false = 不打（默认）。写入成功只留一条精简的 [写入成功]，控制台干净。
+#   true  = 打，但也不是全量 —— 上千字符的组件 SNBT 会被折叠成 […N 字符…]，一行约 90 字符。
+# 排障不需要开这个：直接 /sbkill debug 就能打印完整写入命令。
+verbose-commands: false
 
 messages:
   prefix: "&8[&c拔刀剑&8] &r"
@@ -42,5 +44,5 @@ messages:
   soul-set: "&a已将 &f{player} &a手持刀的耀魂设为 &f{value}&a。"
   refine-set: "&a已将 &f{player} &a手持刀的锻造数设为 &f{value}&a。"
   get-result: "&7{player} &7手持刀：&f杀敌数 &c{kill} &7| &f耀魂 &d{soul} &7| &f锻造数 &b{refine}"
-  write-failed: "&c写入失败（{reason}）。请把控制台日志发回给插件作者。"
+  write-failed: "&c写入失败（{reason}）。执行 &f/sbkill debug &c可打印完整写入命令。"
   reloaded: "&a配置已重载。"
