@@ -1,0 +1,46 @@
+# ============================================================
+#  SlashBladeKillEditor  ——  拔刀剑杀敌数编辑插件
+#  目标环境：Arclight NeoForge 1.21.1 + SlashBlade: Resharped 2.0.x
+#  数据路径：物品组件 slashblade:blade_state 内的 killCount / proudSoul / refine
+# ============================================================
+
+# 仅允许服务端 OP 执行本插件的所有命令：
+#   true  = 只有 OP 能执行（默认，最严格；非 OP 既不能执行也看不到命令）
+#   false = 关闭 OP 限制，改用权限节点 sbkilleditor.* 控制（可下放给非 OP 管理员）
+ops-only: true
+
+limits:
+  # 杀敌数上限（普通玩家；拥有 sbkilleditor.admin 的玩家无视此限制）
+  max-kill-count: 1000000
+  # 耀魂上限
+  max-proud-soul: 1000000
+  # 锻造数上限
+  max-refine: 1000000
+  # 是否允许写入负数（false = 负数一律拒绝）
+  allow-negative: false
+
+# 写入完成后强制刷新一次玩家背包：
+# 部分服务端修改组件后客户端不会立即刷新 tooltip，开启此项可解决。
+# 若发现刷新有副作用（极罕见），可改为 false。
+sync-inventory-after-write: true
+
+# 把插件派发出去的每一条原版命令都打到控制台（前缀 [CMD]），便于排错。
+# 默认开。确认一切正常后可改为 false 让日志安静下来。
+verbose-commands: true
+
+messages:
+  prefix: "&8[&c拔刀剑&8] &r"
+  usage: "&7/sbkill &fget &8| &fset <数量> &8| &fadd <数量> &8| &freset &8| &fsoul <数量> &8| &frefine <数量> &8| &freload"
+  need-player: "&c控制台执行时请指定玩家：&f/sbkill <玩家> <子命令>"
+  player-offline: "&c玩家 &f{player} &c不在线。"
+  no-permission: "&c你没有权限执行这个操作。"
+  not-holding: "&c{player} 手上没有拿着拔刀剑（未找到刀刃数据组件）。"
+  invalid-number: "&c数字无效：&f{input}"
+  too-large: "&c数值超出上限：&f{value} &7> &f{max}"
+  kill-set: "&a已将 &f{player} &a手持刀的杀敌数设为 &f{value}&a。"
+  kill-added: "&a已将 &f{player} &a手持刀的杀敌数 &f{old} &a→ &f{new}&a。"
+  soul-set: "&a已将 &f{player} &a手持刀的耀魂设为 &f{value}&a。"
+  refine-set: "&a已将 &f{player} &a手持刀的锻造数设为 &f{value}&a。"
+  get-result: "&7{player} &7手持刀：&f杀敌数 &c{kill} &7| &f耀魂 &d{soul} &7| &f锻造数 &b{refine}"
+  write-failed: "&c写入失败（{reason}）。请把控制台日志发回给插件作者。"
+  reloaded: "&a配置已重载。"

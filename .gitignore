@@ -1,0 +1,29 @@
+# ---- Gradle ----
+.gradle/
+build/
+out/
+
+# 保留 wrapper（gradlew 依赖它，务必提交）
+!gradle/wrapper/gradle-wrapper.jar
+
+# ---- IDE ----
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+.settings/
+.classpath
+.project
+
+# ---- Java ----
+*.class
+
+# ---- OS ----
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---- 本地临时 ----
+*.log
+.tmp/

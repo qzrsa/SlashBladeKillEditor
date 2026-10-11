@@ -1,0 +1,24 @@
+name: SlashBladeKillEditor
+version: 1.0.0
+main: cn.qzrs.sbkilleditor.SlashBladeKillEditor
+api-version: '1.21'
+authors: [qzrs]
+description: '修改手持拔刀剑的杀敌数 / 耀魂 / 锻造数（SlashBlade Resharped 1.21.1）'
+commands:
+  sbkill:
+    description: 拔刀剑数据编辑
+    usage: /sbkill help
+    aliases: [bladekill, sbke]
+    # 命令级权限：无此权限者既不能执行，Tab 补全里也不会出现该命令
+    permission: sbkilleditor.use
+    permission-message: '&c你没有权限执行该命令（仅限管理员）。'
+permissions:
+  sbkilleditor.use:
+    description: 允许编辑自己手持的拔刀剑
+    default: op
+  sbkilleditor.others:
+    description: 允许编辑其他玩家手持的拔刀剑
+    default: op
+  sbkilleditor.admin:
+    description: 管理员权限（reload、改耀魂/锻造数、无视数值上限）
+    default: op

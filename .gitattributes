@@ -1,0 +1,14 @@
+# 统一换行符，避免跨平台构建问题
+* text=auto
+
+# Gradle wrapper：Linux/macOS 必须是 LF，Windows 批处理必须是 CRLF
+gradlew            text eol=lf
+gradlew.bat        text eol=crlf
+*.sh               text eol=lf
+
+# 二进制文件不要做换行转换
+*.jar              binary
+*.png              binary
+*.jpg              binary
+*.gif              binary
+*.zip              binary

@@ -1,0 +1,52 @@
+// SlashBladeKillEditor —— 拔刀剑杀敌数编辑插件（Bukkit / Spigot API）
+// 目标环境：Arclight NeoForge 1.21.1 + SlashBlade: Resharped 2.0.x
+// 只使用 org.bukkit.* 核心 API，保证在 Spigot / Arclight 上均可运行。
+
+plugins {
+    id 'java'
+}
+
+group = 'cn.qzrs'
+version = '1.0.0'
+description = 'Edit SlashBlade kill count / proud soul / refine on the held blade'
+
+repositories {
+    mavenCentral()
+    // Spigot API
+    maven { url = 'https://hub.spigotmc.org/nexus/content/repositories/snapshots/' }
+    // Spigot 依赖（bungeecord-chat 等）
+    maven { url = 'https://oss.sonatype.org/content/repositories/snapshots' }
+    // Minecraft 官方库（brigadier / datafixerupper）
+    maven { url = 'https://libraries.minecraft.net/' }
+}
+
+dependencies {
+    // 编译期只需 API，运行期由服务端提供
+    compileOnly 'org.spigotmc:spigot-api:1.21.1-R0.1-SNAPSHOT'
+}
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_21
+    targetCompatibility = JavaVersion.VERSION_21
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+    options.compilerArgs << '-Xlint:deprecation'
+}
+
+processResources {
+    filteringCharset = 'UTF-8'
+}
+
+jar {
+    archiveBaseName = 'SlashBladeKillEditor'
+    archiveVersion = project.version
+    // 无第三方依赖，普通 jar 即可
+    manifest {
+        attributes(
+            'Implementation-Title': 'SlashBladeKillEditor',
+            'Implementation-Version': project.version
+        )
+    }
+}
