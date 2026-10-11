@@ -7,7 +7,7 @@ plugins {
 }
 
 group = 'cn.qzrs'
-version = '1.0.2'
+version = '1.0.3'
 description = 'Edit SlashBlade kill count / proud soul / refine on the held blade'
 
 repositories {

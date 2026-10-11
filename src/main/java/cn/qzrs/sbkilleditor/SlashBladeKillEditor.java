@@ -34,8 +34,17 @@ public final class SlashBladeKillEditor extends JavaPlugin {
         getLogger().info("SlashBladeKillEditor 已启用 —— 目标组件路径 slashblade:blade_state");
         getLogger().info("  服务端: " + safeVersion()
                 + " | 中转装备路径候选: " + String.join(" → ", BladeAccess.EQUIP_PATHS));
-        getLogger().info("  [CMD] 命令回显: " + (cfg.verboseCommands ? "开" : "关（默认）")
-                + " | 写入失败时会自动打印本次试过的命令，无需提前开启");
+        getLogger().info("  命令长度阈值: " + describeThreshold(cfg.relayFirstAboveLength)
+                + " | [CMD] 命令回显: " + (cfg.verboseCommands ? "开" : "关（默认）"));
+        getLogger().info("  写入失败时会自动打印本次试过的命令；"
+                + "反馈捕获: " + (cfg.captureCommandFeedback ? "开" : "关（默认，排障时可开）"));
+    }
+
+    /** 把 relay-first-above-length 说成人话。 */
+    private static String describeThreshold(int v) {
+        return (v <= 0)
+                ? "已关闭（永远先试命令通道）"
+                : "主命令超过 " + v + " 字符直接走中转盔甲架";
     }
 
     private static String safeVersion() {

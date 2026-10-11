@@ -271,11 +271,13 @@ public final class SbkillCommand implements CommandExecutor, TabCompleter {
 
     /**
      * 成功日志里要不要带通道名。
-     * 命中首选通道（正常情况）返回空串，只有降级时才标出来 —— 让日常日志尽量短。
+     * 命中首选通道（正常情况）返回空串，其余情况才标出通道 —— 让日常日志尽量短。
+     * 注意中转有两种：{@code 中转盔甲架（长命令捷径）} 是**主动**选的，
+     * 裸 {@code 中转盔甲架} 才是前两条通道都失败后的兜底。
      */
     private static String channelSuffix(String stage) {
         return BladeAccess.PRIMARY_CHANNEL.equals(stage)
-                ? "" : "（降级通道：" + stage + "）";
+                ? "" : "（通道：" + stage + "）";
     }
 
     // =====================================================================

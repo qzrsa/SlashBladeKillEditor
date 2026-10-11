@@ -10,6 +10,7 @@ import org.bukkit.inventory.meta.ItemMeta;
 import org.bukkit.World;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.EnumMap;
 import java.util.List;
 import java.util.Map;
@@ -40,8 +41,15 @@ import java.util.regex.Pattern;
  *       <b>懒召唤</b>（{@code execute unless entity … run summon}），所以热路径完全不需要
  *       {@code /kill} —— 本服 {@code /kill} 被插件接管、裸 {@code kill @e[…] } 必失败。
  *       所有 {@code from entity} 搬回都先做 {@code if data} 存在性判断，
- *       避免把空手当物品搬、误清玩家主手。</li>
+ *       避免把空手当物品搬、误清玩家主手。<br>
+ *       <b>注意语义</b>：{@code from entity} 是<b>复制</b>（源槽位不清空），所以整条链路玩家
+ *       全程不会失去手里的刀，代价是中转实体上会留一份副本 —— 写入成功后由
+ *       {@link #finishRelay} 清除，绝不放它掉到地上（那会凭空多一把刀）。</li>
  * </ol>
+ *
+ * <p>另外：<b>主命令超过 {@code relay-first-above-length}（默认 2000）字符时直接跳到最后一条</b>，
+ * 不再先试两条注定失败的长命令通道。实测 898/976/958 字符的刀走命令通道成功，
+ * 而 3099 字符的重度改装刀（带镶嵌宝石与词缀）三条通道全挂 —— 长命令本身就是失败信号。
  *
  * <h2>为什么校验要「延后一拍」</h2>
  * 本服实测：命令反馈是<strong>即时</strong>的（原版 {@code Replaced a slot on …} 立刻出现），
@@ -125,6 +133,15 @@ public final class BladeAccess {
      */
     public static final String PRIMARY_CHANNEL = "minecraft:item";
 
+    /** 中转盔甲架通道的日志标签（前两条命令通道都失败时的兜底）。 */
+    public static final String RELAY_LABEL = "中转盔甲架";
+
+    /**
+     * 「长命令捷径」的日志标签：主命令超过 {@code relay-first-above-length} 时**主动**选择中转，
+     * 不是兜底降级，所以日志上要能区分开。
+     */
+    public static final String RELAY_SHORTCUT_LABEL = "中转盔甲架（长命令捷径）";
+
     /**
      * 日志回显单行上限。<b>只是个兜底</b>：折叠组件体后行长度约 90 字符，
      * 中转用的 {@code summon} / 搬回命令约 230 字符 —— 两者都远在阈值内，会完整打印。
@@ -134,18 +151,42 @@ public final class BladeAccess {
 
     private final SlashBladeKillEditor plugin;
     private final PluginConfig cfg;
-    private final CommandSender consoleSender;
+    /** 真正用于派发命令的发送者：默认是控制台；开了反馈捕获则是它的代理。 */
+    private final CommandSender dispatchSender;
+    /** 反馈捕获器；未开启时为 {@code null}。 */
+    private final FeedbackCapture capture;
 
     private String lastDispatchError;
     private String lastError;
 
-    /** 本次写入请求实际派发过的命令（成功时不留痕，失败时整体打出来复盘）。 */
-    private final List<String> attemptLog = new ArrayList<>();
+    /**
+     * 本次写入请求实际派发过的命令（含服务端对该命令的反馈，若开了捕获）。
+     * 成功时不留痕，失败时整体打出来复盘。
+     */
+    private final List<Attempt> attemptLog = new ArrayList<>();
+
+    /** 一条派发记录：命令全文 + 服务端对它的反馈行。 */
+    private static final class Attempt {
+        final String command;
+        final List<String> feedback;
+
+        Attempt(String command, List<String> feedback) {
+            this.command = command;
+            this.feedback = feedback;
+        }
+    }
 
     public BladeAccess(SlashBladeKillEditor plugin, PluginConfig cfg) {
         this.plugin = plugin;
         this.cfg = cfg;
-        this.consoleSender = Bukkit.getConsoleSender();
+        CommandSender console = Bukkit.getConsoleSender();
+        if (cfg.captureCommandFeedback) {
+            this.capture = new FeedbackCapture();
+            this.dispatchSender = capture.wrap(console);
+        } else {
+            this.capture = null;
+            this.dispatchSender = console;
+        }
     }
 
     // =====================================================================
@@ -212,11 +253,35 @@ public final class BladeAccess {
         String id = it.getType().getKey().toString();
         String tail = "item replace entity " + p.getName()
                 + " weapon.mainhand with " + id + newComps;
+        String primary = "minecraft:" + tail;
 
-        // 方案表：命令优先（命名空间写法最不容易被插件拦），最后是 null = 中转盔甲架
-        String[] plan = {"minecraft:" + tail, tail, null};
+        // 超长命令直接走中转，省掉两次注定失败的派发（也少刷两行日志）。
+        // 经验值见 config.yml 的 relay-first-above-length。
+        String[] plan = planFor(primary, cfg.relayFirstAboveLength);
+        if (plan.length == 1) {
+            plugin.getLogger().info("[写入] 主命令 " + primary.length() + " 字符 > 阈值 "
+                    + cfg.relayFirstAboveLength + "（relay-first-above-length），直接走中转盔甲架。");
+        }
         attemptLog.clear();
         runPlan(p, f, value, plan, 0, cb);
+    }
+
+    /**
+     * 决定本次写入的方案表。<b>纯函数，便于离线测试</b>。
+     *
+     * @param primary       首选命令（带 {@code minecraft:} 命名空间的完整写入命令）
+     * @param threshold     主命令长度阈值；{@code <= 0} 表示不启用该优化
+     * @return 方案表：正常为 {@code [primary, 普通写法, null(中转)]}；
+     *         主命令超长时为 {@code [null]} —— 直接走中转，不做注定失败的尝试。
+     */
+    static String[] planFor(String primary, int threshold) {
+        if (threshold > 0 && primary != null && primary.length() > threshold) {
+            return new String[]{null};
+        }
+        String tail = (primary != null && primary.startsWith("minecraft:"))
+                ? primary.substring("minecraft:".length())
+                : primary;
+        return new String[]{primary, tail, null};
     }
 
     /**
@@ -232,19 +297,23 @@ public final class BladeAccess {
         }
 
         String cmd = plan[idx];
+        final boolean shortcut = (cmd == null && plan.length == 1);
         if (cmd != null) {
-            dispatch(consoleSender, cmd);
+            dispatch(cmd);
             if (verify(p, f, value)) {
                 lastError = null;
                 cb.done(true, channelLabel(cmd));
                 return;
             }
         } else {
-            plugin.getLogger().info("[写入] 命令通道未生效，降级为中转盔甲架…");
+            plugin.getLogger().info(shortcut
+                    ? "[写入] 走中转盔甲架（长命令捷径）…"
+                    : "[写入] 两条命令通道均未生效，改用中转盔甲架…");
             relayWrite(p, f, value);
             if (verify(p, f, value)) {
                 lastError = null;
-                cb.done(true, channelLabel(null));
+                finishRelay(p);
+                cb.done(true, shortcut ? RELAY_SHORTCUT_LABEL : RELAY_LABEL);
                 return;
             }
         }
@@ -256,7 +325,12 @@ public final class BladeAccess {
             }
             if (verify(p, f, value)) {
                 lastError = null;
-                cb.done(true, channelLabel(cmd));
+                if (cmd == null) {
+                    finishRelay(p);
+                }
+                cb.done(true, (cmd == null)
+                        ? (shortcut ? RELAY_SHORTCUT_LABEL : RELAY_LABEL)
+                        : channelLabel(cmd));
                 return;
             }
             runPlan(p, f, value, plan, next, cb);
@@ -266,7 +340,7 @@ public final class BladeAccess {
     /** 把完整命令折算成短标签，避免日志被上千字符的组件 SNBT 刷屏。 */
     private static String channelLabel(String cmd) {
         if (cmd == null) {
-            return "中转盔甲架";
+            return RELAY_LABEL;
         }
         if (cmd.startsWith("minecraft:")) {
             return PRIMARY_CHANNEL;
@@ -291,7 +365,11 @@ public final class BladeAccess {
 
     /**
      * 全命令实现的中转链路。热路径<strong>不含 {@code /kill}</strong>：
-     * 中转实体按需召唤、之后一直留着复用，插件卸载时统一清理。
+     * 中转实体按需召唤、之后一直留着复用，写入成功后立即清理。
+     *
+     * <p>关键语义（决定这段代码正确性）：{@code item replace … from entity …} 是
+     * <b>复制</b>，不是搬移 —— 源槽位不清空。所以②之后玩家手里仍然有刀（安全），
+     * ④把改好的副本覆盖回主手，而中转实体上那份副本由 {@link #finishRelay} 清除。
      */
     private void relayWrite(Player p, Field f, int value) {
         String name = p.getName();
@@ -299,21 +377,21 @@ public final class BladeAccess {
         String ctx = "execute at " + name + " run ";
 
         // ① 懒召唤：不存在才建（不用被接管的 /kill 做清理）
-        dispatch(consoleSender, ctx + "execute unless entity " + sel + " run summon armor_stand ~ ~ ~ "
+        dispatch(ctx + "execute unless entity " + sel + " run summon armor_stand ~ ~ ~ "
                 + "{Tags:[\"" + relayTag(p) + "\"],Marker:1b,Invisible:1b,NoGravity:1b,"
                 + "Silent:1b,Invulnerable:1b,PersistenceRequired:1b,ShowArms:1b}");
 
-        // ② 把玩家手里的刀搬进中转
-        dispatch(consoleSender, ctx + "item replace entity " + sel
+        // ② 把玩家手里的刀**复制**进中转（源槽位不清空 → 玩家全程不会失去刀）
+        dispatch(ctx + "item replace entity " + sel
                 + " weapon.mainhand from entity " + name + " weapon.mainhand");
 
         // ③ 改数值。逐条候选路径都试，但**每条都必须先 if data 判断字段真实存在** ——
         //    否则 data modify ... set value 会把不存在的路径凭空造出来，命令回「成功」而实际没改。
         for (String equip : EQUIP_PATHS) {
-            dispatch(consoleSender, buildModifyCmd(ctx, sel, equip, f, value));
+            dispatch(buildModifyCmd(ctx, sel, equip, f, value));
         }
 
-        // ④ 搬回玩家主手
+        // ④ 把改好的副本复制回玩家主手
         moveBack(sel, name);
     }
 
@@ -344,7 +422,7 @@ public final class BladeAccess {
      */
     private void moveBack(String sel, String playerName) {
         for (String equip : EQUIP_PATHS) {
-            dispatch(consoleSender, buildMoveBackCmd(playerName, sel, equip));
+            dispatch(buildMoveBackCmd(playerName, sel, equip));
         }
     }
 
@@ -366,6 +444,50 @@ public final class BladeAccess {
     }
 
     /**
+     * 把中转实体主手的东西取出来（取出后它手上就空了）；没有东西返回 {@code null}。
+     *
+     * <p>先读、再清空，然后才把物品交出去 —— 顺序不能反，否则清空失败就会**凭空多出一份**。
+     */
+    private static ItemStack takeFromRelay(ArmorStand as) {
+        try {
+            if (as.getEquipment() == null) {
+                return null;
+            }
+            ItemStack held = as.getEquipment().getItemInMainHand();
+            if (held == null || held.getType() == Material.AIR) {
+                return null;
+            }
+            as.getEquipment().setItemInMainHand(null);
+            return held;
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    /**
+     * 成功写入后收尾：删掉中转实体，免得场上留一堆隐形盔甲架。
+     *
+     * <p><b>为什么残留物要清掉而不是留着/掉落</b>：{@code item replace <目标> <槽位> from entity …}
+     * 的语义是<strong>复制</strong>源槽位（Minecraft Wiki 命令 {@code /item}：source 参数
+     * "Specifies an entity to <b>copy</b> items from"），源槽位<strong>不会</strong>被清空。
+     * 所以走完「复制进去 → 改数值 → 复制回来」之后，中转实体手上必然还留着那份（已改好的）
+     * 副本 —— 那是重复件，落到地上就是凭空多一把刀。写入既然已经回读校验通过，
+     * 此刻它只能是重复件，直接随实体一起清除。
+     */
+    private void finishRelay(Player p) {
+        ArmorStand relay = findRelay(p);
+        if (relay == null) {
+            return;
+        }
+        ItemStack residue = takeFromRelay(relay);
+        if (residue != null) {
+            plugin.getLogger().info("[清理] 中转实体手上残留「" + residue.getType() + " x"
+                    + residue.getAmount() + "」，写入已确认成功，故判定为重复副本并清除。");
+        }
+        relay.remove();
+    }
+
+    /**
      * 抢救：玩家主手空了，说明刀还卡在中转实体里。
      *
      * <p>这里<strong>故意不走命令</strong>，而是用纯 Bukkit 读中转实体、直接搬回 ——
@@ -383,10 +505,8 @@ public final class BladeAccess {
                     + " 主手为空，但没找到中转实体 —— 刀应该没丢。");
             return;
         }
-        ItemStack held = relay.getEquipment() == null
-                ? new ItemStack(Material.AIR)
-                : relay.getEquipment().getItemInMainHand();
-        if (held.getType() == Material.AIR) {
+        ItemStack held = takeFromRelay(relay);
+        if (held == null) {
             plugin.getLogger().warning("[抢救] " + p.getName()
                     + " 主手为空，中转实体手上也是空的 —— 没有可抢救的物品。");
             return;
@@ -395,7 +515,6 @@ public final class BladeAccess {
         plugin.getLogger().warning("[抢救] 检测到「" + held.getType() + " x" + held.getAmount()
                 + "」还卡在中转实体 " + relayTag(p) + " 里，用纯 Bukkit 直接搬回…");
         try {
-            relay.getEquipment().setItemInMainHand(null);
             p.getInventory().setItemInMainHand(held);
             p.updateInventory();
             plugin.getLogger().warning("[抢救] 已搬回主手。");
@@ -407,6 +526,61 @@ public final class BladeAccess {
                 // 忽略
             }
             plugin.getLogger().severe("[抢救] 搬回失败（" + t + "），物品已退回中转实体，未丢失。");
+        }
+    }
+
+    /**
+     * 卸载前收尾：把所有中转实体手上还留着的物品**先取出来**，再删实体。
+     *
+     * <p><b>顺序至关重要</b>：{@code Entity#remove()} <b>不会掉落装备</b>，
+     * 直接删一个还装着刀的中转实体 = 把刀销毁。所以必须先取物品
+     * （在线玩家优先放回主手，否则原地掉落），最后才删实体。
+     */
+    private void recoverRelayItems() {
+        for (World w : Bukkit.getWorlds()) {
+            for (ArmorStand as : w.getEntitiesByClass(ArmorStand.class)) {
+                String owner = null;
+                for (String tag : as.getScoreboardTags()) {
+                    if (tag.startsWith(RELAY_TAG_PREFIX)) {
+                        owner = tag.substring(RELAY_TAG_PREFIX.length());
+                        break;
+                    }
+                }
+                if (owner == null) {
+                    continue;
+                }
+                try {
+                    ItemStack held = takeFromRelay(as);
+                    if (held != null) {
+                        Player p = Bukkit.getPlayerExact(owner);
+                        if (p != null && p.isOnline()
+                                && p.getInventory().getItemInMainHand().getType() == Material.AIR) {
+                            // 主手空的 = 真正需要归还（刀确实被搬出去了这种情况）
+                            p.getInventory().setItemInMainHand(held);
+                            p.updateInventory();
+                            plugin.getLogger().warning("[清理] 中转实体里的「" + held.getType()
+                                    + "」已还给 " + owner + "。");
+                        } else if (p != null && p.isOnline()) {
+                            // 主手有东西 = 刀已经回来了，中转里的是复制语义留下的重复副本。
+                            // 掉落会凭空多一把刀，所以清除。
+                            plugin.getLogger().warning("[清理] 中转实体里残留「" + held.getType()
+                                    + " x" + held.getAmount() + "」，而 " + owner
+                                    + " 主手已有物品 —— 判定为重复副本，已清除（未掉落）。");
+                        } else {
+                            // 主人不在线，无法判断，宁可掉在地上也不销毁
+                            w.dropItemNaturally(as.getLocation(), held);
+                            plugin.getLogger().warning("[清理] 中转实体里的「" + held.getType()
+                                    + "」已掉落在 " + w.getName() + " "
+                                    + as.getLocation().getBlockX() + ","
+                                    + as.getLocation().getBlockY() + ","
+                                    + as.getLocation().getBlockZ() + "（" + owner + " 不在线）。");
+                        }
+                    }
+                } catch (Throwable t) {
+                    plugin.getLogger().warning("[清理] 处理中转实体时出错：" + t);
+                }
+                as.remove();
+            }
         }
     }
 
@@ -432,21 +606,17 @@ public final class BladeAccess {
         }
     }
 
-    /** 插件卸载时清理所有中转实体（纯 Bukkit，不用 /kill）。 */
+    /**
+     * 插件卸载时清理中转实体（纯 Bukkit，不用 {@code /kill}）。
+     *
+     * <p>先 {@link #recoverRelayItems()} 把还留在实体手里的物品取出来，再删实体 ——
+     * {@code remove()} 不掉落装备，反序会把卡住的刀一起销毁。
+     */
     public void shutdown() {
         try {
-            for (World w : Bukkit.getWorlds()) {
-                for (ArmorStand as : w.getEntitiesByClass(ArmorStand.class)) {
-                    for (String tag : as.getScoreboardTags()) {
-                        if (tag.startsWith(RELAY_TAG_PREFIX)) {
-                            as.remove();
-                            break;
-                        }
-                    }
-                }
-            }
-        } catch (Throwable ignored) {
-            // 忽略
+            recoverRelayItems();
+        } catch (Throwable t) {
+            plugin.getLogger().warning("[清理] 中转实体清理失败：" + t);
         }
     }
 
@@ -595,7 +765,9 @@ public final class BladeAccess {
         out.add("opsOnly=" + cfg.opsOnly
                 + "  写入方案顺序=minecraft:item → item → 中转盔甲架"
                 + "  中转标签=" + relayTag(p));
-        out.add("[CMD]回显=" + cfg.verboseCommands + "（false 时不会在控制台刷命令）");
+        out.add("[CMD]回显=" + cfg.verboseCommands + "（false 时不会在控制台刷命令）"
+                + "  反馈捕获=" + cfg.captureCommandFeedback
+                + "（true 时写入失败会附带服务端对每条命令的回话）");
 
         ItemStack main = p.getInventory().getItemInMainHand();
         out.add("主手: " + main.getType() + " x" + main.getAmount());
@@ -623,6 +795,10 @@ public final class BladeAccess {
                 out.add("写入命令预览(命名空间): " + ns);
                 out.add("写入命令长度: 普通 " + plain.length() + " 字符 / 命名空间 "
                         + ns.length() + " 字符");
+                if (cfg.relayFirstAboveLength > 0 && ns.length() > cfg.relayFirstAboveLength) {
+                    out.add("  ↑ 已超过 relay-first-above-length=" + cfg.relayFirstAboveLength
+                            + " —— 本次写入会直接走中转盔甲架，不再派发这条长命令。");
+                }
             }
         }
 
@@ -697,18 +873,23 @@ public final class BladeAccess {
      *
      * <p>失败时另有一条兜底：本次写入若最终全军覆没，{@link #dumpAttempts} 会把
      * 试过的命令一次性打出来，<b>不用提前开 verbose 也能复盘</b>。
+     *
+     * <p>若开了 {@code capture-command-feedback}，每条命令派发前后会清空/取走反馈缓冲区，
+     * 于是能把它和服务端对它的回话一一对上（失败时打印）。
      */
-    private void dispatch(CommandSender s, String commandLine) {
-        if (s == null || commandLine == null) {
+    private void dispatch(String commandLine) {
+        if (commandLine == null) {
             return;
         }
-        attemptLog.add(commandLine);
+        if (capture != null) {
+            capture.clear();
+        }
         if (cfg.verboseCommands) {
             plugin.getLogger().info("[CMD] /" + compact(commandLine));
         }
         try {
             // dispatchCommand 返回 false = 服务端压根没认这条命令（另一种失败，和"执行了但没生效"不同）
-            boolean handled = Bukkit.dispatchCommand(s, commandLine);
+            boolean handled = Bukkit.dispatchCommand(dispatchSender, commandLine);
             if (!handled) {
                 this.lastDispatchError = "服务端未识别该命令（dispatchCommand 返回 false）";
                 plugin.getLogger().warning("[CMD] 未被识别 /" + compact(commandLine));
@@ -718,19 +899,32 @@ public final class BladeAccess {
             plugin.getLogger().warning("[CMD] 派发失败 /" + compact(commandLine)
                     + " -> " + lastDispatchError);
         }
+        attemptLog.add(new Attempt(commandLine,
+                (capture == null) ? Collections.emptyList() : capture.drain()));
     }
 
     /** 写入彻底失败时，把本次试过的命令一次性打到控制台，便于直接拷给作者复盘。 */
     private void dumpAttempts(Player p, Field f, int value, String[] plan) {
         plugin.getLogger().warning("[写入失败] " + p.getName() + " " + FIELD_NAME.get(f) + "=" + value
-                + " —— 三条通道均未生效。本次实际派发了 " + attemptLog.size() + " 条命令：");
+                + " —— 所有写入通道均未生效。本次实际派发了 " + attemptLog.size() + " 条命令：");
         int n = 1;
-        for (String c : attemptLog) {
-            plugin.getLogger().warning("  (" + n++ + ") [" + c.length() + " 字符] /" + compact(c));
+        for (Attempt a : attemptLog) {
+            plugin.getLogger().warning("  (" + n++ + ") [" + a.command.length() + " 字符] /"
+                    + compact(a.command));
+            for (String fb : a.feedback) {
+                plugin.getLogger().warning("      ↳ 服务端反馈: " + fb);
+            }
+        }
+        if (capture == null) {
+            plugin.getLogger().warning("[写入失败] 想看服务端对每条命令的回话？"
+                    + "把 config.yml 的 capture-command-feedback 改成 true，"
+                    + "/sbkill reload 后复现一次即可（会多出「↳ 服务端反馈」行）。");
         }
         if (plan.length > 0 && plan[0] != null) {
             plugin.getLogger().warning("[写入失败] 主命令完整长度 " + plan[0].length()
                     + " 字符；完整内容请执行 /sbkill debug 查看。");
+        } else {
+            plugin.getLogger().warning("[写入失败] 本次主命令超长，已跳过长命令通道直接走中转（见 relay-first-above-length）。");
         }
         plugin.getLogger().warning("[写入失败] 请把上面这段（连同此前后各几行控制台输出）发回给插件作者。");
     }
